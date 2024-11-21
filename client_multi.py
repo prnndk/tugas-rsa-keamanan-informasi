@@ -1,87 +1,127 @@
 import socket
 import threading
 import os
+import queue
 from des import *
 from rsa import *
-
 
 class Client:
     def __init__(self, HOST, PORT):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((HOST, PORT))
+        self.response_queue = queue.Queue()  # Queue for handling specific responses
 
         self.name = input("Masukkan nama Anda: ")
         self.socket.send(self.name.encode())
 
-        # Receive Server's Public Key
-        server_public_key_data = self.socket.recv(1024).decode()
-        self.server_public_key = eval(server_public_key_data)
-
         # Generate RSA Key Pair
         self.public_key, self.private_key = generate_keys()
-        self.socket.send(str(self.public_key).encode())  # Send public key to server
+        self.send_public_key_to_server()
 
+        # Thread to handle incoming messages
         threading.Thread(target=self.receive_message, daemon=True).start()
+
+        # Start sending messages
         self.send_message()
 
+    def send_public_key_to_server(self):
+        """Send the public key to the server."""
+        public_key_string = f"PUB_KEY:{str(self.public_key)}"
+        self.socket.send(public_key_string.encode())
+
+    def request_public_key(self, target_id):
+        """Request the public key of a specific target ID from the server."""
+        request_message = f"getkey:{target_id}"
+        self.socket.send(request_message.encode())
+        print("Meminta Public Key Ke Server...")
+
+        try:
+            # Wait for a response in the queue with a timeout
+            response = self.response_queue.get(timeout=10)
+
+            if response.startswith("PUB_KEY:"):
+                # Isolate the public key portion
+                public_key_data = response[len("PUB_KEY:"):]
+                
+                # Evaluate the tuple to a Python object
+                public_key = eval(public_key_data)
+                
+                # Ensure it is a tuple of two integers
+                if isinstance(public_key, tuple) and len(public_key) == 2:
+                    return public_key
+                else:
+                    print("Invalid public key format.")
+                    return None
+            else:
+                print("Unexpected response format.")
+                return None
+        except queue.Empty:
+            print("Timeout waiting for public key response.")
+            return None
+
+
+    def route_message(self, message):
+        """Route messages based on their type."""
+        if message.startswith("PUB_KEY:"):
+            self.response_queue.put(message)
+        elif message.startswith("NOTENC:"):
+            print(message[7:])
+        elif message.startswith("Dari "):
+            self.process_received_message(message)
+        else:
+            print("Pesan tidak dikenali.")
+
+    def process_received_message(self, message):
+        """Process incoming encrypted messages."""
+        try:
+            parts = message.split(": ", 3)
+            sender_info = parts[0]  # Includes sender's ID and name
+            encrypted_message = parts[1]
+            encrypted_des_key = parts[2]
+
+            # Decrypt DES key using own private key
+            des_key = RSAdecrypt(string_to_ciphertext(encrypted_des_key), self.private_key)
+
+            # Get sender's public key to decrypt the message
+            sender_id = sender_info.split("(")[-1][:-1]
+            sender_public_key = self.request_public_key(sender_id)
+
+            if not sender_public_key:
+                print("Gagal memperoleh kunci publik pengirim.")
+                return
+
+            # Decrypt the DES key using sender's public key
+            des_key = RSAdecrypt(string_to_ciphertext(des_key), sender_public_key)
+            print("-- Kunci DES berhasil didekripsi.")
+
+            # Decrypt the message using DES
+            self.key = str2hex(des_key)
+            self.rkb, self.rk = generate_round_key(self.key)
+            decrypted_text = decrypt(encrypted_message, self.rkb, self.rk)
+            print("-- Pesan berhasil didekripsi.")
+            print("")
+            print("===============================================")
+            print("")
+            print(f"{sender_info}: {decrypted_text}")
+            print("")
+            print("===============================================")
+            print("")
+        except Exception as e:
+            print(f"Kesalahan saat memproses pesan: {e}")
 
     def receive_message(self):
         while True:
             try:
-                # Receive the encrypted message
                 message = self.socket.recv(1024).decode()
                 if message:
-                    if message.startswith("NOTENC:"):
-                        decrypted_text = message[7:]
-                        print(decrypted_text)
-                    elif message.startswith("Dari "):
-                        # Receive the encrypted DES key
-                        encrypted_des_key_message = self.socket.recv(1024).decode()
-                        if not encrypted_des_key_message.startswith("KEY:"):
-                            print("Kesalahan format DES key.")
-                            continue
-
-                        encrypted_des_key = encrypted_des_key_message[4:]
-                        des_key = RSAdecrypt(string_to_ciphertext(encrypted_des_key), self.private_key)
-
-                        # Convert the DES key to hexadecimal format
-                        self.key = str2hex(des_key)
-                        self.rkb, self.rk = generate_round_key(self.key)  # Generate round keys for DES
-
-                        parts = message.split(": ", 1)
-                        sender_info = parts[0]
-                        encrypted_text = parts[1]
-                        decrypted_text = decrypt(encrypted_text, self.rkb, self.rk)
-                        print(f"{sender_info}: {decrypted_text}")
-                    elif message.startswith("Broadcast dari "):
-                        # Receive the encrypted DES key
-                        encrypted_des_key_message = self.socket.recv(1024).decode()
-                        if not encrypted_des_key_message.startswith("KEY:"):
-                            print("Kesalahan format DES key.")
-                            continue
-
-                        encrypted_des_key = encrypted_des_key_message[4:]
-                        des_key = RSAdecrypt(string_to_ciphertext(encrypted_des_key), self.private_key)
-
-                        # Convert the DES key to hexadecimal format
-                        self.key = str2hex(des_key)
-                        self.rkb, self.rk = generate_round_key(self.key)  # Generate round keys for DES
-
-                        parts = message.split(": ", 1)
-                        broadcast_info = parts[0]
-                        encrypted_text = parts[1]
-                        decrypted_text = decrypt(encrypted_text, self.rkb, self.rk)
-                        print(f"{broadcast_info}: {decrypted_text}")
-                    else:
-                        continue
+                    threading.Thread(target=self.route_message, args=(message,), daemon=True).start()
                 else:
                     print("Koneksi ke server terputus.")
                     self.socket.close()
                     break
             except Exception as e:
-                print(f"Terjadi kesalahan dalam menerima pesan: {e}")
-                continue
-        self.socket.close()
+                print(f"Kesalahan saat menerima pesan: {e}")
+
 
     def send_message(self):
         while True:
@@ -90,54 +130,46 @@ class Client:
                 if message.lower() == 'exit':
                     self.socket.close()
                     os._exit(0)
+
                 if message.startswith("to:"):
                     target_id, actual_message = message[3:].split(" ", 1)
                     actual_message = pad(actual_message)
 
+                    # Request target's public key from the server
+                    target_public_key = self.request_public_key(target_id)
+                    if not target_public_key:
+                        print(f"Gagal memperoleh kunci publik untuk ID {target_id}.")
+                        continue  
+                    # Input DES key
                     while True:
                         key = input("Masukan Key (8 Karakter): ")
                         if len(key) == 8:
                             break
                         else:
                             print("Key harus 8 karakter")
+
+                    # Encrypt DES key using own private key and target's public key
                     des_key = key
-                    self.key = str2hex(key)
-                    self.rkb, self.rk = generate_round_key(self.key)
-
-                    encrypted_des_key = RSAencrypt(des_key, self.server_public_key)
+                    encrypted_des_key = RSAencrypt(des_key, self.private_key)
+                    encrypted_des_key = RSAencrypt(ciphertext_to_string(encrypted_des_key), target_public_key)
                     encrypted_key_string = ciphertext_to_string(encrypted_des_key)
+                    print("-- Kunci DES berhasil dienkripsi.")
 
-                    encrypted_text = encrypt(actual_message, self.rkb, self.rk)
-                    message_to_send = f"to: {target_id} {encrypted_text}"
-                elif message.startswith("broadcast"):
-                    actual_message = message[10:]
-                    actual_message = pad(actual_message)
-
-                    while True:
-                        key = input("Masukan Key (8 Karakter): ")
-                        if len(key) == 8:
-                            break
-                        else:
-                            print("Key harus 8 karakter")
-                    des_key = key
-                    self.key = str2hex(key)
+                    # Encrypt the message using DES
+                    self.key = str2hex(des_key)
                     self.rkb, self.rk = generate_round_key(self.key)
-
-                    encrypted_des_key = RSAencrypt(des_key, self.server_public_key)
-                    encrypted_key_string = ciphertext_to_string(encrypted_des_key)
-
                     encrypted_text = encrypt(actual_message, self.rkb, self.rk)
-                    message_to_send = f"broadcast {encrypted_text}"
+                    print("-- Pesan berhasil dienkripsi.")
+
+                    message_to_send = f"to: {target_id}: {encrypted_text}: {encrypted_key_string}"
                 else:
                     print("Format pesan tidak valid.")
                     continue
-                self.socket.send(message_to_send.encode())  # Send the message
-                self.socket.send(encrypted_key_string.encode())  # Send encrypted DES key
-            except Exception as e:
-                print(f"Terjadi kesalahan dalam mengirim pesan: {e}")
-                continue
-        self.socket.close()
 
+                self.socket.send(message_to_send.encode())
+                print("-- Pesan terkirim.")
+            except Exception as e:
+                print(f"Kesalahan saat mengirim pesan: {e}")
 
 if __name__ == '__main__':
     Client('127.0.0.1', 7632)
