@@ -61,3 +61,21 @@ def ciphertext_to_string(ciphertext):
 # Convert ciphertext string back to a list of integers
 def string_to_ciphertext(ciphertext_string):
     return list(map(int, ciphertext_string.split()))
+
+def sign_message(message, private_key):
+    """Create digital signature using private key"""
+    n, d = private_key
+    # Use consistent message encoding
+    message_bytes = message.encode('utf-8')
+    message_hash = sum(message_bytes)  
+    signature = pow(message_hash, d, n)
+    return signature
+
+def verify_signature(message, signature, public_key):
+    """Verify digital signature using public key"""
+    n, e = public_key
+    # Use consistent message encoding
+    message_bytes = message.encode('utf-8')
+    message_hash = sum(message_bytes)
+    decrypted_hash = pow(signature, e, n)
+    return message_hash == decrypted_hash

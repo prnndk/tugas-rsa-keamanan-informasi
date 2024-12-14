@@ -72,40 +72,40 @@ class Client:
             print("Pesan tidak dikenali.")
 
     def process_received_message(self, message):
-        """Process incoming encrypted messages."""
         try:
-            parts = message.split(": ", 3)
-            sender_info = parts[0]  # Includes sender's ID and name
+            parts = message.split(": ", 5)
+            sender_info = parts[0]
             encrypted_message = parts[1]
             encrypted_des_key = parts[2]
+            signature = int(parts[3])
+            original_message = parts[4]
 
-            # Decrypt DES key using own private key
-            des_key = RSAdecrypt(string_to_ciphertext(encrypted_des_key), self.private_key)
-
-            # Get sender's public key to decrypt the message
+            # First verify signature with original message
             sender_id = sender_info.split("(")[-1][:-1]
             sender_public_key = self.request_public_key(sender_id)
-
-            if not sender_public_key:
-                print("Gagal memperoleh kunci publik pengirim.")
-                return
-
-            # Decrypt the DES key using sender's public key
-            des_key = RSAdecrypt(string_to_ciphertext(des_key), sender_public_key)
-            print("-- Kunci DES berhasil didekripsi.")
-
-            # Decrypt the message using DES
-            self.key = str2hex(des_key)
-            self.rkb, self.rk = generate_round_key(self.key)
-            decrypted_text = decrypt(encrypted_message, self.rkb, self.rk)
-            print("-- Pesan berhasil didekripsi.")
-            print("")
-            print("===============================================")
-            print("")
-            print(f"{sender_info}: {decrypted_text}")
-            print("")
-            print("===============================================")
-            print("")
+            
+            is_valid = verify_signature(original_message, signature, sender_public_key)
+            
+            if is_valid:
+                print("-- Tanda tangan digital terverifikasi.")
+                # Proceed with message decryption
+                des_key = RSAdecrypt(string_to_ciphertext(encrypted_des_key), self.private_key)
+                des_key = RSAdecrypt(string_to_ciphertext(des_key), sender_public_key)
+                print("-- Kunci DES berhasil didekripsi.")
+                
+                self.key = str2hex(des_key)
+                self.rkb, self.rk = generate_round_key(self.key)
+                decrypted_text = decrypt(encrypted_message, self.rkb, self.rk)
+                
+                print("")
+                print("===============================================")
+                print("")
+                print(f"{sender_info}: {decrypted_text}")
+                print("")
+                print("===============================================")
+                print("")
+            else:
+                print("PERINGATAN: Tanda tangan digital tidak valid!")
         except Exception as e:
             print(f"Kesalahan saat memproses pesan: {e}")
 
@@ -133,13 +133,19 @@ class Client:
 
                 if message.startswith("to:"):
                     target_id, actual_message = message[3:].split(" ", 1)
+                    original_message = actual_message
                     actual_message = pad(actual_message)
 
+                    # Sign original unpadded message
+                    signature = sign_message(original_message, self.private_key)
+                    signature_string = str(signature)
+                    
                     # Request target's public key from the server
                     target_public_key = self.request_public_key(target_id)
                     if not target_public_key:
                         print(f"Gagal memperoleh kunci publik untuk ID {target_id}.")
                         continue  
+
                     # Input DES key
                     while True:
                         key = input("Masukan Key (8 Karakter): ")
@@ -161,7 +167,7 @@ class Client:
                     encrypted_text = encrypt(actual_message, self.rkb, self.rk)
                     print("-- Pesan berhasil dienkripsi.")
 
-                    message_to_send = f"to: {target_id}: {encrypted_text}: {encrypted_key_string}"
+                    message_to_send = f"to: {target_id}: {encrypted_text}: {encrypted_key_string}: {signature_string}: {original_message}"
                 else:
                     print("Format pesan tidak valid.")
                     continue
